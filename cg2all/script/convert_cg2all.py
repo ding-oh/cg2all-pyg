@@ -11,11 +11,12 @@ import argparse
 import numpy as np
 
 import torch
-import dgl
+from torch.utils.data import DataLoader
 
 os.environ["OPENMM_PLUGIN_DIR"] = "/dev/null"
 import mdtraj
 
+from cg2all.lib.graph import batch_graphs, unbatch_graphs
 from cg2all.lib.libconfig import MODEL_HOME
 from cg2all.lib.libdata import (
     PredictionData,
@@ -175,13 +176,15 @@ def main():
         unitcell_lengths = input_s.cg.unitcell_lengths
         unitcell_angles = input_s.cg.unitcell_angles
     #
+    collate = lambda xs: batch_graphs(xs)
     if len(input_s) > 1 and (arg.n_proc > 1 or arg.batch_size > 1):
-        input_s = dgl.dataloading.GraphDataLoader(
-            input_s, batch_size=arg.batch_size, num_workers=arg.n_proc, shuffle=False
+        input_s = DataLoader(
+            input_s, batch_size=arg.batch_size, num_workers=arg.n_proc,
+            shuffle=False, collate_fn=collate,
         )
     else:
-        input_s = dgl.dataloading.GraphDataLoader(
-            input_s, batch_size=1, num_workers=1, shuffle=False
+        input_s = DataLoader(
+            input_s, batch_size=1, num_workers=1, shuffle=False, collate_fn=collate,
         )
     timing["loading_input"] = time.time() - timing["loading_input"]
     #
@@ -215,14 +218,14 @@ def main():
             t0 = time.time()
             with torch.no_grad():
                 R = model.forward(batch)[0]["R"].cpu().detach().numpy()
-                mask = batch.ndata["output_atom_mask"].cpu().detach().numpy()
+                mask = batch.node["output_atom_mask"].cpu().detach().numpy()
                 xyz.append(R[mask > 0.0])
             timing["forward_pass"] += time.time() - t0
             t0 = time.time()
         #
         timing["writing_output"] = time.time()
         if arg.batch_size > 1:
-            batch = dgl.unbatch(batch)[0]
+            batch = unbatch_graphs(batch)[0]
             xyz = np.concatenate(xyz, axis=0)
             xyz = xyz.reshape((n_frame0, -1, 3))
         else:

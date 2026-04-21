@@ -6,11 +6,11 @@ import numpy as np
 from typing import List
 from collections import namedtuple
 from libquat import Quaternion
-from numpy_basics import *
-from residue_constants import *
+from cg2all.lib.numpy_basics import *
+from cg2all.lib.residue_constants import *
 import json
 
-from libconfig import DATA_HOME
+from cg2all.lib.libconfig import DATA_HOME
 
 np.set_printoptions(suppress=True)
 

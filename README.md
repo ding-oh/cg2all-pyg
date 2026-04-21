@@ -1,51 +1,60 @@
-# cg2all
-Convert coarse-grained protein structure to all-atom model
+# cg2all-pyg
 
-## Web server / Google Colab notebook
-[![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces-blue)](https://huggingface.co/spaces/huhlim/cg2all)</br>
-A demo web page is available for conversions of CG model to all-atom structure via Huggingface space.</br>
+> **Fork of [huhlim/cg2all](https://github.com/huhlim/cg2all)** — DGL-free port on top of PyTorch Geometric + torch ≥ 2.2.
+> The SE(3)-Transformer backbone has been re-implemented in-tree (`cg2all/lib/se3/`) so that **all 15 published checkpoints on [Zenodo 8393343](https://zenodo.org/record/8393343) load unchanged** (heavy-atom deviation < 2e-3 Å vs the DGL reference across all 10 CG models).
+> Original project, paper, and checkpoints © Heo & Feig, licensed under Apache-2.0 (see `LICENSE`).
+> Paper: **One bead per residue can describe all-atom protein structures**, *Structure* 32(1):97–111.e6 (2024) — [doi:10.1016/j.str.2023.10.013](https://doi.org/10.1016/j.str.2023.10.013) · [PMC10872525](https://pmc.ncbi.nlm.nih.gov/articles/PMC10872525/).
 
-[![Google Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/huhlim/cg2all/blob/main/cg2all.ipynb)</br>
-A Google Colab notebook is available for tasks:
-- Task 1: Conversion of an all-atom structure to a CG model using __convert_all2cg__
-- Task 2: Conversion of a CG model to an all-atom structure using __convert_cg2all__
-- Task 3: Conversion of a CG simulation trajectory to an atomistic simulation trajectory using __convert_cg2all__
+Convert coarse-grained protein structure to all-atom model.
 
-[![Google Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/huhlim/cg2all/blob/main/cryo_em_minimizer.ipynb)</br>
-A Google Colab notebook is available for local optimization of a protein model structure against a cryo-EM density map using __cryo_em_minimizer.py__
+## Legacy (DGL) vs this fork (PyG) — benchmark
+
+CPU, 3 repeats per case, same Zenodo 8393343 checkpoints loaded in both envs.
+
+| case | input | legacy fwd (s) | this fork fwd (s) | speed | heavy-atom max Δ (Å) |
+|---|---|---:|---:|---:|---:|
+| 1ab1 Cα        | `1ab1_A.calpha.pdb`               | 1.024 | 1.455 | 0.70× | **0.000000** (bit-exact) |
+| 1ab1 Residue   | `1ab1_A.residue.pdb`              | 0.706 | 0.826 | 0.85× | 0.001 |
+| 1ab1 Backbone  | `1ab1_A.bb.pdb`                   | 0.513 | 0.819 | 0.63× | 0.001 |
+| 1ab1 Martini   | `1ab1_A.martini.pdb`              | 1.992 | 0.621 | **3.21×** | 0.001 |
+| 1jni Cα + DCD  | `1jni.calpha.{pdb,dcd}` (5 frames)| 4.699 | 2.310 | **2.03×** | 6.3 × 10⁻⁴ |
+
+**Numerics**: every case matches legacy within the 1-ULP PDB coordinate resolution (≤ 1e-3 Å), with 1ab1 Cα bit-exact. Across all 10 CG models the heavy-atom deviation stays below 2e-3 Å.
+
+**Speed**: on small single-PDB cases the DGL CPU C++ kernels still beat native `scatter_reduce` by ~25–40 %; on larger graphs (Martini) and repeated forward passes (DCD trajectory) the torch 2.5 path wins by **2–3×**. GPU results pending.
+
+## Upstream-hosted demos (run the original DGL version)
+
+These public demos are hosted by the upstream authors and run the **DGL-based `huhlim/cg2all` codebase**, not this fork. They are linked here for convenience; this fork does not ship hosted demos.
+
+- [![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces-blue)](https://huggingface.co/spaces/huhlim/cg2all) — interactive CG → all-atom conversion.
+- [![cg2all notebook](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/huhlim/cg2all/blob/main/cg2all.ipynb) — `convert_all2cg`, `convert_cg2all`, and CG-trajectory → atomistic-trajectory workflows in Google Colab.
+- [![cryo-EM notebook](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/huhlim/cg2all/blob/main/cryo_em_minimizer.ipynb) — cryo-EM density-map local optimization with `cryo_em_minimizer` in Google Colab.
 
 ## Installation
-These steps will install Python libraries including [cg2all (this repository)](https://github.com/huhlim/cg2all), [a modified MDTraj](https://github.com/huhlim/mdtraj), [a modified SE3Transformer](https://github.com/huhlim/SE3Transformer), and other dependent libraries. The installation steps also place executables `convert_cg2all` and `convert_all2cg` in your python binary directory.
+This package depends on PyTorch (≥ 2.2), PyTorch Geometric, [a modified MDTraj](https://github.com/huhlim/mdtraj), and standard scientific Python libraries. It no longer depends on DGL or the legacy `huhlim/SE3Transformer` fork — the SE(3)-Transformer has been ported in-tree (`cg2all/lib/se3/`) and the existing Zenodo 8393343 checkpoints load unchanged. Installing this package also places the executables `convert_cg2all`, `convert_all2cg`, and `cryo_em_minimizer` on your PATH.
 
-This package is tested on Linux (CentOS) and MacOS (Apple Silicon, M1).
+Tested on Linux.
 
-#### for CPU only
+#### CPU
 ```bash
-pip install git+http://github.com/huhlim/cg2all
-```
-#### for CUDA (GPU) usage
-1. Install [Miniconda](https://docs.conda.io/en/latest/miniconda.html)
-2. Create an environment with [DGL](https://www.dgl.ai/pages/start.html) library with CUDA support
-```bash
-# This is an example with cudatoolkit=11.3.
-# Set a proper cudatoolkit version that is compatible with your CUDA driver and DGL library.
-# dgl>=1.1 occasionally raises some errors, so please use dgl<=1.0.
-conda create --name cg2all pip cudatoolkit=11.3 dgl=1.0 -c dglteam/label/cu113
-```
-3. Activate the environment
-```bash
-conda activate cg2all
-```
-4. Install this package
-```bash
-pip install git+http://github.com/huhlim/cg2all
+python -m pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+python -m pip install torch_cluster -f https://data.pyg.org/whl/torch-2.5.0+cpu.html
+python -m pip install git+https://github.com/ding-oh/cg2all-pyg
 ```
 
-#### for cryo_em_minimizer usage
-You need additional python package, `mrcfile` to deal with cryo-EM density map.
+#### CUDA (GPU)
+Replace the wheel index with the CUDA variant matching your driver/toolkit. Example for CUDA 12.4:
 ```bash
-pip install mrcfile
+conda create -n cg2all-pyg python=3.11 -y && conda activate cg2all-pyg
+python -m pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu124
+python -m pip install torch_cluster -f https://data.pyg.org/whl/torch-2.5.0+cu124.html
+python -m pip install git+https://github.com/ding-oh/cg2all-pyg
 ```
+For other CUDA versions, pick the matching index at <https://download.pytorch.org/whl/> and <https://data.pyg.org/whl/>.
+
+#### cryo_em_minimizer
+`mrcfile` is included in the package dependencies and installed automatically.
 
 ## Usages
 ### convert_cg2all
@@ -203,8 +212,26 @@ options:
 The training/validation/test sets are available at [zenodo](https://zenodo.org/record/8273739).
 
 
-## Reference
-Lim Heo & Michael Feig, "One particle per residue is sufficient to describe all-atom protein structures", _bioRxiv_ (**2023**). [Link](https://www.biorxiv.org/content/10.1101/2023.05.22.541652v1)
+## Citation
 
+This fork only re-implements the runtime; **all scientific credit — model design, training, checkpoints — belongs to the original authors**. If you use this package, please cite the original paper:
 
-[![DOI](https://zenodo.org/badge/585390653.svg)](https://zenodo.org/doi/10.5281/zenodo.10009208)
+> Lim Heo & Michael Feig, "One bead per residue can describe all-atom protein structures", *Structure* **32**(1):97–111.e6 (**2024**). [doi:10.1016/j.str.2023.10.013](https://doi.org/10.1016/j.str.2023.10.013) · [PMC10872525](https://pmc.ncbi.nlm.nih.gov/articles/PMC10872525/) · preprint (earlier title: "One particle per residue is sufficient…"): [bioRxiv 2023.05.22.541652](https://www.biorxiv.org/content/10.1101/2023.05.22.541652v1)
+
+BibTeX (published version):
+```bibtex
+@article{heo2024cg2all,
+  title   = {One bead per residue can describe all-atom protein structures},
+  author  = {Heo, Lim and Feig, Michael},
+  journal = {Structure},
+  volume  = {32},
+  number  = {1},
+  pages   = {97--111.e6},
+  year    = {2024},
+  doi     = {10.1016/j.str.2023.10.013},
+  pmid    = {38000367},
+  pmcid   = {PMC10872525}
+}
+```
+
+Upstream project: [huhlim/cg2all](https://github.com/huhlim/cg2all) — [![DOI](https://zenodo.org/badge/585390653.svg)](https://zenodo.org/doi/10.5281/zenodo.10009208)

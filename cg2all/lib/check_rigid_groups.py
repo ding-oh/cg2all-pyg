@@ -19,15 +19,15 @@ BASE = pathlib.Path(__file__).parents[1].resolve()
 LIB_HOME = str(BASE / "lib")
 sys.path.insert(0, LIB_HOME)
 
-import libmodel
-from libconfig import BASE, DTYPE
-from libdata import PDBset, create_trajectory_from_batch
-import libcg
-from torch_basics import v_norm_safe, inner_product
-from libloss import loss_f
-from libcg import ResidueBasedModel, CalphaBasedModel, Martini
-from libpdb import write_SSBOND
-from residue_constants import (
+import cg2all.lib.libmodel as libmodel
+from cg2all.lib.libconfig import BASE, DTYPE
+from cg2all.lib.libdata import PDBset, create_trajectory_from_batch
+import cg2all.lib.libcg as libcg
+from cg2all.lib.torch_basics import v_norm_safe, inner_product
+from cg2all.lib.libloss import loss_f
+from cg2all.lib.libcg import ResidueBasedModel, CalphaBasedModel, Martini
+from cg2all.lib.libpdb import write_SSBOND
+from cg2all.lib.residue_constants import (
     RIGID_TRANSFORMS_TENSOR,
     RIGID_TRANSFORMS_DEP,
     RIGID_GROUPS_TENSOR,

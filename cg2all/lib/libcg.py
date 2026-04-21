@@ -3,19 +3,19 @@
 import mdtraj
 import numpy as np
 import torch
-import dgl
 
-from libconfig import DTYPE, EPS
-from libpdb import PDB
-import numpy_basics
-from torch_basics import (
+from cg2all.lib.graph import radius_graph as _radius_graph
+from cg2all.lib.libconfig import DTYPE, EPS
+from cg2all.lib.libpdb import PDB
+import cg2all.lib.numpy_basics as numpy_basics
+from cg2all.lib.torch_basics import (
     v_size,
     inner_product,
     torsion_angle,
     one_hot_encoding,
     acos_safe,
 )
-from residue_constants import (
+from cg2all.lib.residue_constants import (
     MAX_RESIDUE_TYPE,
     AMINO_ACID_s,
     AMINO_ACID_ALT_s,
@@ -132,9 +132,9 @@ class BaseClass(PDB):
         geom_s = {}
         #
         # n_neigh
+        edge_index = _radius_graph(r, 1.0, self_loop=False)
         n_neigh = torch.zeros(r.shape[0], dtype=DTYPE, device=device)
-        graph = dgl.radius_graph(r, 1.0)
-        n_neigh = graph.in_degrees(graph.nodes())
+        n_neigh.scatter_add_(0, edge_index[1], torch.ones_like(edge_index[1], dtype=DTYPE))
         geom_s["n_neigh"] = n_neigh[:, None]
 
         if _r.shape[1] > 1:

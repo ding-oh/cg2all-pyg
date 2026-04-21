@@ -1,16 +1,22 @@
 #!/usr/bin/env python
+from __future__ import annotations
 
 import os
 import sys
 import torch
 import numpy as np
-import dgl
 import mrcfile
 
 import mdtraj
 
-from libconfig import DTYPE, DATA_HOME
-from residue_constants import (
+from cg2all.lib.graph import (
+    Graph,
+    edge_ids,
+    has_edges_between,
+    radius_graph as _radius_graph,
+)
+from cg2all.lib.libconfig import DTYPE, DATA_HOME
+from cg2all.lib.residue_constants import (
     AMINO_ACID_s,
     MAX_RESIDUE_TYPE,
     MAX_ATOM,
@@ -21,17 +27,17 @@ from residue_constants import (
     ATOM_INDEX_CA,
     ATOM_INDEX_C,
 )
-from torch_basics import (
+from cg2all.lib.torch_basics import (
     v_size,
     v_norm,
     inner_product,
     acos_safe,
     torsion_angle,
 )
-from libdata import resSeq_to_number
+from cg2all.lib.libdata import resSeq_to_number
 
-from libloss import loss_f_bonded_energy_aux as loss_f_bonded_energy_aa_aux
-from libloss import CoarseGrainedGeometryEnergy, loss_f_torsion_energy
+from cg2all.lib.libloss import loss_f_bonded_energy_aux as loss_f_bonded_energy_aa_aux
+from cg2all.lib.libloss import CoarseGrainedGeometryEnergy, loss_f_torsion_energy
 
 
 def trilinear_interpolation(
@@ -144,11 +150,11 @@ class CryoEM_loss(object):
         return u_em
 
 
-def loss_f_bonded_energy_aa(batch: dgl.DGLGraph, R: torch.Tensor, weight_s=(1.0, 0.5)):
+def loss_f_bonded_energy_aa(batch: Graph, R: torch.Tensor, weight_s=(1.0, 0.5)):
     if weight_s[0] == 0.0:
         return 0.0
 
-    bonded = batch.ndata["continuous"][1:]
+    bonded = batch.node["continuous"][1:]
     n_bonded = torch.sum(bonded)
 
     # vector: -C -> N
@@ -188,9 +194,9 @@ class DistanceRestraint(object):
         #
         valid_residue = data.cg.atom_mask_cg[:, 0] > 0.0
         r_cg0 = data.r_cg[valid_residue, 0].clone().detach().to(device)
-        g, d0 = dgl.radius_graph(r_cg0, radius, self_loop=False, get_distances=True)
-        self.d0 = d0[:, 0]
-        self.edge_src, self.edge_dst = g.edges()
+        ei = _radius_graph(r_cg0, radius, self_loop=False)
+        self.edge_src, self.edge_dst = ei[0], ei[1]
+        self.d0 = (r_cg0[self.edge_dst] - r_cg0[self.edge_src]).norm(dim=-1)
         if bfac_s.std() < 0.1 or uniform_restraint:
             self.w0 = torch.ones_like(self.d0, device=device)
         else:
@@ -206,7 +212,7 @@ class DistanceRestraint(object):
             self.w0[sequence_separation > sequence_cutoff] = 0.0
 
     def eval(self, batch):
-        r_cg = batch.ndata["pos"]
+        r_cg = batch.node["pos"]
         dr = r_cg[self.edge_dst] - r_cg[self.edge_src]
         d = torch.sqrt(torch.square(dr).sum(dim=-1))
         loss = torch.square(d - self.d0) * self.w0
@@ -292,54 +298,58 @@ class MinimizableData(object):
         geom_s = self.cg.get_geometry(pos, self.cg.atom_mask_cg, self.cg.continuous[0])
         #
         node_feat = self.cg.geom_to_feature(geom_s, self.cg.continuous, dtype=self.dtype)
-        data = dgl.radius_graph(pos[:, 0], self.radius, self_loop=False)
-        data.ndata["pos"] = pos[:, 0]
-        data.ndata["node_feat_0"] = node_feat["0"][..., None]  # shape=(N, 16, 1)
-        data.ndata["node_feat_1"] = node_feat["1"]  # shape=(N, 4, 3)
+        edge_index = _radius_graph(pos[:, 0], self.radius, self_loop=False)
+        num_nodes = pos.shape[0]
+        node = {
+            "pos": pos[:, 0],
+            "node_feat_0": node_feat["0"][..., None],
+            "node_feat_1": node_feat["1"],
+        }
+        edge = {"rel_pos": pos[edge_index[1], 0] - pos[edge_index[0], 0]}
         #
-        edge_src, edge_dst = data.edges()
-        data.edata["rel_pos"] = pos[edge_dst, 0] - pos[edge_src, 0]
-        #
-        data.ndata["chain_index"] = torch.as_tensor(self.cg.chain_index, dtype=torch.long)
+        node["chain_index"] = torch.as_tensor(self.cg.chain_index, dtype=torch.long)
         resSeq, resSeqIns = resSeq_to_number(self.cg.resSeq)
-        data.ndata["resSeq"] = torch.as_tensor(resSeq, dtype=torch.long)
-        data.ndata["resSeqIns"] = torch.as_tensor(resSeqIns, dtype=torch.long)
-        data.ndata["residue_type"] = torch.as_tensor(self.cg.residue_index, dtype=torch.long)
-        data.ndata["continuous"] = torch.as_tensor(self.cg.continuous[0], dtype=self.dtype)
-        data.ndata["output_atom_mask"] = torch.as_tensor(self.cg.atom_mask, dtype=self.dtype)
+        node["resSeq"] = torch.as_tensor(resSeq, dtype=torch.long)
+        node["resSeqIns"] = torch.as_tensor(resSeqIns, dtype=torch.long)
+        node["residue_type"] = torch.as_tensor(self.cg.residue_index, dtype=torch.long)
+        node["continuous"] = torch.as_tensor(self.cg.continuous[0], dtype=self.dtype)
+        node["output_atom_mask"] = torch.as_tensor(self.cg.atom_mask, dtype=self.dtype)
         #
-        ssbond_index = torch.full((data.num_nodes(),), -1, dtype=torch.long)
+        ssbond_index = torch.full((num_nodes,), -1, dtype=torch.long)
         for cys_i, cys_j in self.cg.ssbond_s:
             if cys_i < cys_j:  # because of loss_f_atomic_clash
                 ssbond_index[cys_j] = cys_i
             else:
                 ssbond_index[cys_i] = cys_j
-        data.ndata["ssbond_index"] = ssbond_index
+        node["ssbond_index"] = ssbond_index
         #
-        edge_feat = torch.zeros((data.num_edges(), 3), dtype=self.dtype)  # bonded / ssbond / space
+        num_edges = int(edge_index.shape[1])
+        edge_feat = torch.zeros((num_edges, 3), dtype=self.dtype)  # bonded / ssbond / space
         #
         # bonded
         pair_s = [(i - 1, i) for i, cont in enumerate(self.cg.continuous[0]) if cont]
         pair_s = torch.as_tensor(pair_s, dtype=torch.long)
-        has_edges = data.has_edges_between(pair_s[:, 0], pair_s[:, 1])
-        pair_s = pair_s[has_edges]
-        eid = data.edge_ids(pair_s[:, 0], pair_s[:, 1])
+        has_e = has_edges_between(edge_index, pair_s[:, 0], pair_s[:, 1], num_nodes)
+        pair_s = pair_s[has_e]
+        eid = edge_ids(edge_index, pair_s[:, 0], pair_s[:, 1], num_nodes)
         edge_feat[eid, 0] = 1.0
-        eid = data.edge_ids(pair_s[:, 1], pair_s[:, 0])
+        eid = edge_ids(edge_index, pair_s[:, 1], pair_s[:, 0], num_nodes)
         edge_feat[eid, 0] = 1.0
         #
         # ssbond
         if len(self.cg.ssbond_s) > 0:
             pair_s = torch.as_tensor(self.cg.ssbond_s, dtype=torch.long)
-            has_edges = data.has_edges_between(pair_s[:, 0], pair_s[:, 1])
-            pair_s = pair_s[has_edges]
-            eid = data.edge_ids(pair_s[:, 0], pair_s[:, 1])
+            has_e = has_edges_between(edge_index, pair_s[:, 0], pair_s[:, 1], num_nodes)
+            pair_s = pair_s[has_e]
+            eid = edge_ids(edge_index, pair_s[:, 0], pair_s[:, 1], num_nodes)
             edge_feat[eid, 1] = 1.0
-            eid = data.edge_ids(pair_s[:, 1], pair_s[:, 0])
+            eid = edge_ids(edge_index, pair_s[:, 1], pair_s[:, 0], num_nodes)
             edge_feat[eid, 1] = 1.0
         #
         # space
         edge_feat[edge_feat.sum(dim=-1) == 0.0, 2] = 1.0
-        data.edata["edge_feat_0"] = edge_feat[..., None]
+        edge["edge_feat_0"] = edge_feat[..., None]
 
-        return data
+        return Graph(
+            pos=node["pos"], edge_index=edge_index, num_nodes=num_nodes, node=node, edge=edge
+        )

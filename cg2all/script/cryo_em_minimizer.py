@@ -13,7 +13,6 @@ import mdtraj
 import numpy as np
 
 import torch
-import dgl
 
 from cg2all.lib.libconfig import MODEL_HOME, DTYPE
 from cg2all.lib.libdata import create_topology_from_data, standardize_atom_name
@@ -151,10 +150,10 @@ def main():
     ret = model.forward(batch)[0]
     #
     out_top, out_atom_index = create_topology_from_data(batch)
-    out_mask = batch.ndata["output_atom_mask"].cpu().detach().numpy()
+    out_mask = batch.node["output_atom_mask"].cpu().detach().numpy()
     #
     ssbond = []
-    for cys_i, cys_j in enumerate(batch.ndata["ssbond_index"].cpu().detach().numpy()):
+    for cys_i, cys_j in enumerate(batch.node["ssbond_index"].cpu().detach().numpy()):
         if cys_j != -1:
             ssbond.append((cys_j, cys_i))
     ssbond.sort()

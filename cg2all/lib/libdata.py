@@ -18,12 +18,20 @@ warnings.filterwarnings("ignore")
 import torch
 from torch.utils.data import Dataset
 
-import dgl
+from cg2all.lib.graph import (
+    Graph,
+    batch_graphs,
+    edge_ids,
+    has_edges_between,
+    radius_graph,
+    subgraph,
+    unbatch_graphs,
+)
 
-from libconfig import BASE, DTYPE
-import libcg
-from torch_basics import v_norm, v_size
-from residue_constants import (
+from cg2all.lib.libconfig import BASE, DTYPE
+import cg2all.lib.libcg as libcg
+from cg2all.lib.torch_basics import v_norm, v_size
+from cg2all.lib.residue_constants import (
     MAX_ATOM,
     AMINO_ACID_s,
     AMINO_ACID_REV_s,
@@ -105,9 +113,8 @@ class PDBset(Dataset):
             if pt_fn.exists():
                 try:
                     data = torch.load(pt_fn)
-                    # temporary
-                    if "bfactors" in data.ndata:
-                        del data.ndata["bfactors"]
+                    if "bfactors" in data.node:
+                        del data.node["bfactors"]
                         torch.save(data, pt_fn)
                     if self.crop > 0:
                         return self.get_subgraph(data)
@@ -154,74 +161,77 @@ class PDBset(Dataset):
         )
         #
         node_feat = cg.geom_to_feature(geom_s, cg.continuous, dtype=self.dtype)
-        data = dgl.radius_graph(pos[:, 0], self.radius, self_loop=self.self_loop)
-        data.ndata["pos"] = pos[:, 0]
-        data.ndata["node_feat_0"] = node_feat["0"][..., None]  # shape=(N, 16, 1)
-        data.ndata["node_feat_1"] = node_feat["1"]  # shape=(N, 4, 3)
+        edge_index = radius_graph(pos[:, 0], self.radius, self_loop=self.self_loop)
+        num_nodes = pos.shape[0]
+        node = {
+            "pos": pos[:, 0],
+            "node_feat_0": node_feat["0"][..., None],  # shape=(N, 16, 1)
+            "node_feat_1": node_feat["1"],  # shape=(N, 4, 3)
+        }
+        edge = {"rel_pos": pos[edge_index[1], 0] - pos[edge_index[0], 0]}
         #
-        edge_src, edge_dst = data.edges()
-        data.edata["rel_pos"] = pos[edge_dst, 0] - pos[edge_src, 0]
-        #
-        data.ndata["chain_index"] = torch.as_tensor(cg.chain_index, dtype=torch.long)
+        node["chain_index"] = torch.as_tensor(cg.chain_index, dtype=torch.long)
         resSeq, resSeqIns = resSeq_to_number(cg.resSeq)
-        data.ndata["resSeq"] = torch.as_tensor(resSeq, dtype=torch.long)
-        data.ndata["resSeqIns"] = torch.as_tensor(resSeqIns, dtype=torch.long)
-        data.ndata["residue_type"] = torch.as_tensor(cg.residue_index, dtype=torch.long)
-        data.ndata["continuous"] = torch.as_tensor(cg.continuous[0], dtype=self.dtype)
-        data.ndata["ss"] = torch.as_tensor(cg.ss[0], dtype=torch.long)
+        node["resSeq"] = torch.as_tensor(resSeq, dtype=torch.long)
+        node["resSeqIns"] = torch.as_tensor(resSeqIns, dtype=torch.long)
+        node["residue_type"] = torch.as_tensor(cg.residue_index, dtype=torch.long)
+        node["continuous"] = torch.as_tensor(cg.continuous[0], dtype=self.dtype)
+        node["ss"] = torch.as_tensor(cg.ss[0], dtype=torch.long)
         #
-        ssbond_index = torch.full((data.num_nodes(),), -1, dtype=torch.long)
+        ssbond_index = torch.full((num_nodes,), -1, dtype=torch.long)
         for cys_i, cys_j in cg.ssbond_s:
             if cys_i < cys_j:  # because of loss_f_atomic_clash
                 ssbond_index[cys_j] = cys_i
             else:
                 ssbond_index[cys_i] = cys_j
-        data.ndata["ssbond_index"] = ssbond_index
+        node["ssbond_index"] = ssbond_index
         #
-        edge_feat = torch.zeros((data.num_edges(), 3), dtype=self.dtype)  # bonded / ssbond / space
+        num_edges = int(edge_index.shape[1])
+        edge_feat = torch.zeros((num_edges, 3), dtype=self.dtype)  # bonded / ssbond / space
         #
         # bonded
         pair_s = [(i - 1, i) for i, cont in enumerate(cg.continuous[0]) if cont]
         pair_s = torch.as_tensor(pair_s, dtype=torch.long)
-        has_edges = data.has_edges_between(pair_s[:, 0], pair_s[:, 1])
-        pair_s = pair_s[has_edges]
-        eid = data.edge_ids(pair_s[:, 0], pair_s[:, 1])
+        has_e = has_edges_between(edge_index, pair_s[:, 0], pair_s[:, 1], num_nodes)
+        pair_s = pair_s[has_e]
+        eid = edge_ids(edge_index, pair_s[:, 0], pair_s[:, 1], num_nodes)
         edge_feat[eid, 0] = 1.0
-        eid = data.edge_ids(pair_s[:, 1], pair_s[:, 0])
+        eid = edge_ids(edge_index, pair_s[:, 1], pair_s[:, 0], num_nodes)
         edge_feat[eid, 0] = 1.0
         #
         # ssbond
         if len(cg.ssbond_s) > 0:
             pair_s = torch.as_tensor(cg.ssbond_s, dtype=torch.long)
-            has_edges = data.has_edges_between(pair_s[:, 0], pair_s[:, 1])
-            pair_s = pair_s[has_edges]
-            eid = data.edge_ids(pair_s[:, 0], pair_s[:, 1])
+            has_e = has_edges_between(edge_index, pair_s[:, 0], pair_s[:, 1], num_nodes)
+            pair_s = pair_s[has_e]
+            eid = edge_ids(edge_index, pair_s[:, 0], pair_s[:, 1], num_nodes)
             edge_feat[eid, 1] = 1.0
-            eid = data.edge_ids(pair_s[:, 1], pair_s[:, 0])
+            eid = edge_ids(edge_index, pair_s[:, 1], pair_s[:, 0], num_nodes)
             edge_feat[eid, 1] = 1.0
         #
         # space
         edge_feat[edge_feat.sum(dim=-1) == 0.0, 2] = 1.0
-        data.edata["edge_feat_0"] = edge_feat[..., None]
+        edge["edge_feat_0"] = edge_feat[..., None]
         #
-        data.ndata["atomic_radius"] = torch.as_tensor(cg.atomic_radius, dtype=self.dtype)
-        data.ndata["atomic_mass"] = torch.as_tensor(cg.atomic_mass, dtype=self.dtype)
-        data.ndata["input_atom_mask"] = torch.as_tensor(cg.atom_mask_cg, dtype=self.dtype)
-        data.ndata["output_atom_mask"] = torch.as_tensor(cg.atom_mask, dtype=self.dtype)
-        data.ndata["pdb_atom_mask"] = torch.as_tensor(cg.atom_mask_pdb, dtype=self.dtype)
-        data.ndata["heavy_atom_mask"] = torch.as_tensor(cg.atom_mask_heavy, dtype=self.dtype)
-        data.ndata["output_xyz"] = torch.as_tensor(cg.R[0], dtype=self.dtype)
-        data.ndata["output_xyz_alt"] = torch.as_tensor(cg.R_alt[0], dtype=self.dtype)
+        node["atomic_radius"] = torch.as_tensor(cg.atomic_radius, dtype=self.dtype)
+        node["atomic_mass"] = torch.as_tensor(cg.atomic_mass, dtype=self.dtype)
+        node["input_atom_mask"] = torch.as_tensor(cg.atom_mask_cg, dtype=self.dtype)
+        node["output_atom_mask"] = torch.as_tensor(cg.atom_mask, dtype=self.dtype)
+        node["pdb_atom_mask"] = torch.as_tensor(cg.atom_mask_pdb, dtype=self.dtype)
+        node["heavy_atom_mask"] = torch.as_tensor(cg.atom_mask_heavy, dtype=self.dtype)
+        node["output_xyz"] = torch.as_tensor(cg.R[0], dtype=self.dtype)
+        node["output_xyz_alt"] = torch.as_tensor(cg.R_alt[0], dtype=self.dtype)
         #
-        data.ndata["correct_bb"] = torch.as_tensor(cg.bb[0], dtype=self.dtype)
-        data.ndata["correct_torsion"] = torch.as_tensor(cg.torsion[0], dtype=self.dtype)
-        data.ndata["torsion_mask"] = torch.as_tensor(cg.torsion_mask, dtype=self.dtype)
+        node["correct_bb"] = torch.as_tensor(cg.bb[0], dtype=self.dtype)
+        node["correct_torsion"] = torch.as_tensor(cg.torsion[0], dtype=self.dtype)
+        node["torsion_mask"] = torch.as_tensor(cg.torsion_mask, dtype=self.dtype)
         #
-        r_cntr = libcg.get_residue_center_of_mass(
-            data.ndata["output_xyz"], data.ndata["atomic_mass"]
+        r_cntr = libcg.get_residue_center_of_mass(node["output_xyz"], node["atomic_mass"])
+        v_cntr = r_cntr - node["output_xyz"][:, ATOM_INDEX_CA]
+        node["v_cntr"] = v_cntr
+        data = Graph(
+            pos=node["pos"], edge_index=edge_index, num_nodes=num_nodes, node=node, edge=edge
         )
-        v_cntr = r_cntr - data.ndata["output_xyz"][:, ATOM_INDEX_CA]
-        data.ndata["v_cntr"] = v_cntr
         #
         if self.use_pt is not None:
             torch.save(data, pt_fn)
@@ -232,24 +242,20 @@ class PDBset(Dataset):
             return data
 
     def get_subgraph(self, graph):
-        n_residues = graph.num_nodes()
+        n_residues = graph.num_nodes
         if n_residues < self.crop:
-            nodes = range(0, n_residues)
-            sub = graph.subgraph(nodes)
-            return sub
-        else:
-            begin = np.random.randint(low=0, high=n_residues - self.crop + 1)
-            nodes = range(begin, begin + self.crop)
-        #
-        sub = graph.subgraph(nodes)
-        #
+            node_idx = torch.arange(n_residues)
+            return subgraph(graph, node_idx)
+        begin = int(np.random.randint(low=0, high=n_residues - self.crop + 1))
+        node_idx = torch.arange(begin, begin + self.crop)
+        sub = subgraph(graph, node_idx)
         for i in range(self.crop):
-            cys = sub.ndata["ssbond_index"][i]
+            cys = int(sub.node["ssbond_index"][i])
             if cys != -1:
                 cys = cys - begin
                 if cys >= self.crop:
                     cys = -1
-                sub.ndata["ssbond_index"][i] = cys
+                sub.node["ssbond_index"][i] = cys
         return sub
 
     def augment_torsion(self, cg, cg_aug):
@@ -327,7 +333,11 @@ class PredictionData(Dataset):
 
     def __getitem__(self, index):
         if index >= self.n_frame0:
-            return dgl.graph([])
+            return Graph(
+                pos=torch.zeros(0, 3, dtype=self.dtype),
+                edge_index=torch.zeros(2, 0, dtype=torch.long),
+                num_nodes=0,
+            )
         #
         if self.dcd_fn is None:
             cg = self.pdb_to_cg(self.pdb_fn)
@@ -345,21 +355,22 @@ class PredictionData(Dataset):
         )
         #
         node_feat = cg.geom_to_feature(geom_s, cg.continuous, dtype=self.dtype)
-        data = dgl.radius_graph(pos[:, 0], self.radius, self_loop=self.self_loop)
-        data.ndata["pos"] = pos[:, 0]
-        data.ndata["node_feat_0"] = node_feat["0"][..., None]  # shape=(N, 16, 1)
-        data.ndata["node_feat_1"] = node_feat["1"]  # shape=(N, 4, 3)
+        edge_index = radius_graph(pos[:, 0], self.radius, self_loop=self.self_loop)
+        num_nodes = pos.shape[0]
+        node = {
+            "pos": pos[:, 0],
+            "node_feat_0": node_feat["0"][..., None],
+            "node_feat_1": node_feat["1"],
+        }
+        edge = {"rel_pos": pos[edge_index[1], 0] - pos[edge_index[0], 0]}
         #
-        edge_src, edge_dst = data.edges()
-        data.edata["rel_pos"] = pos[edge_dst, 0] - pos[edge_src, 0]
-        #
-        data.ndata["chain_index"] = torch.as_tensor(cg.chain_index, dtype=torch.long)
+        node["chain_index"] = torch.as_tensor(cg.chain_index, dtype=torch.long)
         resSeq, resSeqIns = resSeq_to_number(cg.resSeq)
-        data.ndata["resSeq"] = torch.as_tensor(resSeq, dtype=torch.long)
-        data.ndata["resSeqIns"] = torch.as_tensor(resSeqIns, dtype=torch.long)
-        data.ndata["residue_type"] = torch.as_tensor(cg.residue_index, dtype=torch.long)
-        data.ndata["continuous"] = torch.as_tensor(cg.continuous[0], dtype=self.dtype)
-        data.ndata["output_atom_mask"] = torch.as_tensor(cg.atom_mask, dtype=self.dtype)
+        node["resSeq"] = torch.as_tensor(resSeq, dtype=torch.long)
+        node["resSeqIns"] = torch.as_tensor(resSeqIns, dtype=torch.long)
+        node["residue_type"] = torch.as_tensor(cg.residue_index, dtype=torch.long)
+        node["continuous"] = torch.as_tensor(cg.continuous[0], dtype=self.dtype)
+        node["output_atom_mask"] = torch.as_tensor(cg.atom_mask, dtype=self.dtype)
         #
         if self.fix_atom:
             if self.cg_model.NAME in ["MainchainModel", "BackboneModel"]:
@@ -367,45 +378,48 @@ class PredictionData(Dataset):
                 cg.atom_mask_pdb = cg.atom_mask_cg[:, atom_order]
                 cg.R = cg.R_cg[:, :, atom_order]
                 cg.get_structure_information(bb_only=True)
-                data.ndata["correct_bb"] = torch.as_tensor(cg.bb[0], dtype=self.dtype)
-                data.ndata["output_xyz"] = torch.as_tensor(cg.R[0], dtype=self.dtype)
-                data.ndata["pdb_atom_mask"] = torch.as_tensor(cg.atom_mask_pdb, dtype=self.dtype)
+                node["correct_bb"] = torch.as_tensor(cg.bb[0], dtype=self.dtype)
+                node["output_xyz"] = torch.as_tensor(cg.R[0], dtype=self.dtype)
+                node["pdb_atom_mask"] = torch.as_tensor(cg.atom_mask_pdb, dtype=self.dtype)
         #
-        ssbond_index = torch.full((data.num_nodes(),), -1, dtype=torch.long)
+        ssbond_index = torch.full((num_nodes,), -1, dtype=torch.long)
         for cys_i, cys_j in cg.ssbond_s:
             if cys_i < cys_j:  # because of loss_f_atomic_clash
                 ssbond_index[cys_j] = cys_i
             else:
                 ssbond_index[cys_i] = cys_j
-        data.ndata["ssbond_index"] = ssbond_index
+        node["ssbond_index"] = ssbond_index
         #
-        edge_feat = torch.zeros((data.num_edges(), 3), dtype=self.dtype)  # bonded / ssbond / space
+        num_edges = int(edge_index.shape[1])
+        edge_feat = torch.zeros((num_edges, 3), dtype=self.dtype)  # bonded / ssbond / space
         #
         # bonded
         pair_s = [(i - 1, i) for i, cont in enumerate(cg.continuous[0]) if cont]
         pair_s = torch.as_tensor(pair_s, dtype=torch.long)
-        has_edges = data.has_edges_between(pair_s[:, 0], pair_s[:, 1])
-        pair_s = pair_s[has_edges]
-        eid = data.edge_ids(pair_s[:, 0], pair_s[:, 1])
+        has_e = has_edges_between(edge_index, pair_s[:, 0], pair_s[:, 1], num_nodes)
+        pair_s = pair_s[has_e]
+        eid = edge_ids(edge_index, pair_s[:, 0], pair_s[:, 1], num_nodes)
         edge_feat[eid, 0] = 1.0
-        eid = data.edge_ids(pair_s[:, 1], pair_s[:, 0])
+        eid = edge_ids(edge_index, pair_s[:, 1], pair_s[:, 0], num_nodes)
         edge_feat[eid, 0] = 1.0
         #
         # ssbond
         if len(cg.ssbond_s) > 0:
             pair_s = torch.as_tensor(cg.ssbond_s, dtype=torch.long)
-            has_edges = data.has_edges_between(pair_s[:, 0], pair_s[:, 1])
-            pair_s = pair_s[has_edges]
-            eid = data.edge_ids(pair_s[:, 0], pair_s[:, 1])
+            has_e = has_edges_between(edge_index, pair_s[:, 0], pair_s[:, 1], num_nodes)
+            pair_s = pair_s[has_e]
+            eid = edge_ids(edge_index, pair_s[:, 0], pair_s[:, 1], num_nodes)
             edge_feat[eid, 1] = 1.0
-            eid = data.edge_ids(pair_s[:, 1], pair_s[:, 0])
+            eid = edge_ids(edge_index, pair_s[:, 1], pair_s[:, 0], num_nodes)
             edge_feat[eid, 1] = 1.0
         #
         # space
         edge_feat[edge_feat.sum(dim=-1) == 0.0, 2] = 1.0
-        data.edata["edge_feat_0"] = edge_feat[..., None]
+        edge["edge_feat_0"] = edge_feat[..., None]
 
-        return data
+        return Graph(
+            pos=node["pos"], edge_index=edge_index, num_nodes=num_nodes, node=node, edge=edge
+        )
 
 
 def resSeq_to_number(resSeq_s: np.ndarray):
@@ -421,19 +435,19 @@ def resSeq_to_number(resSeq_s: np.ndarray):
     return resSeq_number_s, resSeqIns_s
 
 
-def create_topology_from_data(data: dgl.DGLGraph, write_native: bool = False) -> mdtraj.Topology:
+def create_topology_from_data(data: Graph, write_native: bool = False) -> mdtraj.Topology:
     top = mdtraj.Topology()
     #
     chain_prev = -1
     seg_no = -1
     n_atom = 0
     atom_index = []
-    for i_res in range(data.ndata["residue_type"].size(0)):
-        chain_index = data.ndata["chain_index"][i_res]
-        continuous = data.ndata["continuous"][i_res].cpu().detach().item()
+    for i_res in range(data.node["residue_type"].size(0)):
+        chain_index = data.node["chain_index"][i_res]
+        continuous = data.node["continuous"][i_res].cpu().detach().item()
         #
-        resNum = data.ndata["resSeq"][i_res].cpu().detach().item()
-        resSeqIns = data.ndata["resSeqIns"][i_res].cpu().detach().item()
+        resNum = data.node["resSeq"][i_res].cpu().detach().item()
+        resSeqIns = data.node["resSeqIns"][i_res].cpu().detach().item()
         if resSeqIns == 0:
             resSeq = resNum
         else:
@@ -443,7 +457,7 @@ def create_topology_from_data(data: dgl.DGLGraph, write_native: bool = False) ->
             chain_prev = chain_index
             top_chain = top.add_chain()
         #
-        residue_type_index = int(data.ndata["residue_type"][i_res])
+        residue_type_index = int(data.node["residue_type"][i_res])
         residue_name = AMINO_ACID_s[residue_type_index]
         residue_name_std = AMINO_ACID_REV_s.get(residue_name, residue_name)
         if residue_name == "UNK":
@@ -456,14 +470,14 @@ def create_topology_from_data(data: dgl.DGLGraph, write_native: bool = False) ->
         top_residue.segment_id = f"P{seg_no:03d}"
         #
         if write_native:
-            mask = data.ndata["pdb_atom_mask"][i_res]
+            mask = data.node["pdb_atom_mask"][i_res]
             #
             for i_atm, atom_name in enumerate(ref_res.atom_s):
                 if mask[i_atm] > 0.0:
                     element = mdtraj.core.element.Element.getBySymbol(atom_name[0])
                     top.add_atom(atom_name, element, top_residue)
         else:
-            mask = data.ndata["output_atom_mask"][i_res]
+            mask = data.node["output_atom_mask"][i_res]
             #
             for i_atm, atom_name in zip(ref_res.output_atom_index, ref_res.output_atom_s):
                 if mask[i_atm] > 0.0:
@@ -475,7 +489,7 @@ def create_topology_from_data(data: dgl.DGLGraph, write_native: bool = False) ->
 
 
 def create_trajectory_from_batch(
-    batch: dgl.DGLGraph,
+    batch: Graph,
     R: torch.Tensor = None,
     write_native: bool = False,
 ) -> List[mdtraj.Trajectory]:
@@ -488,24 +502,24 @@ def create_trajectory_from_batch(
     start = 0
     traj_s = []
     ssbond_s = []
-    for idx, data in enumerate(dgl.unbatch(batch)):
+    for idx, data in enumerate(unbatch_graphs(batch)):
         top, atom_index = create_topology_from_data(data, write_native=write_native)
         #
         xyz = []
         if write_native:
-            mask = data.ndata["pdb_atom_mask"].cpu().detach().numpy()
-            xyz.append(data.ndata["output_xyz"].cpu().detach().numpy()[mask > 0.0])
+            mask = data.node["pdb_atom_mask"].cpu().detach().numpy()
+            xyz.append(data.node["output_xyz"].cpu().detach().numpy()[mask > 0.0])
         else:
-            mask = data.ndata["output_atom_mask"].cpu().detach().numpy()
+            mask = data.node["output_atom_mask"].cpu().detach().numpy()
         #
         ssbond = []
-        for cys_i, cys_j in enumerate(data.ndata["ssbond_index"].cpu().detach().numpy()):
+        for cys_i, cys_j in enumerate(data.node["ssbond_index"].cpu().detach().numpy()):
             if cys_j != -1:
                 ssbond.append((cys_j, cys_i))
         ssbond_s.append(sorted(ssbond))
         #
         if R is not None:
-            end = start + data.num_nodes()
+            end = start + data.num_nodes
             xyz.append(R[start:end][mask > 0.0])
             start = end
         #
@@ -542,7 +556,11 @@ def main():
         use_pt="Martini3",
     )
 
-    dataloader = dgl.dataloading.GraphDataLoader(pdbset, batch_size=1, num_workers=24)
+    # NOTE: DGL DataLoader replaced by a plain DataLoader. For batching, wrap `collate_fn=batch_graphs`.
+    from torch.utils.data import DataLoader
+    dataloader = DataLoader(
+        pdbset, batch_size=1, num_workers=24, collate_fn=lambda xs: batch_graphs(xs)
+    )
 
     import tqdm
 

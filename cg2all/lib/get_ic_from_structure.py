@@ -5,9 +5,9 @@ import sys
 import mdtraj
 import numpy as np
 import pathlib
-from libpdb import PDB
-from residue_constants import residue_s, AMINO_ACID_s
-from numpy_basics import *
+from cg2all.lib.libpdb import PDB
+from cg2all.lib.residue_constants import residue_s, AMINO_ACID_s
+from cg2all.lib.numpy_basics import *
 
 import tqdm
 from tqdm.contrib.concurrent import process_map

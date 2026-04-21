@@ -33,7 +33,7 @@ def main():
                 "MC", "mc", "mainchain", "Mainchain", "MainchainModel",
                 "CACM", "cacm", "CalphaCM", "CalphaCMModel",
                 "CASC", "casc", "CalphaSC", "CalphaSCModel",
-                "SC", "sc", "sidechain", "Sidechain",
+                "SC", "sc", "sidechain", "Sidechain", "SidechainModel",
                 ]
         # fmt:on
     )

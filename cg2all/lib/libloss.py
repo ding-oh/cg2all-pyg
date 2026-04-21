@@ -1,12 +1,20 @@
 #!/usr/bin/env python
+from __future__ import annotations
 
 import torch
 
-import dgl
+from cg2all.lib.graph import (
+    Graph,
+    batch_size as _batch_size,
+    radius_graph as _radius_graph,
+    slice_batch as _slice_batch,
+    unbatch_graphs as _unbatch_graphs,
+)
+
 from typing import Optional, List
 
-from libconfig import DTYPE, EPS, DATA_HOME
-from residue_constants import (
+from cg2all.lib.libconfig import DTYPE, EPS, DATA_HOME
+from cg2all.lib.residue_constants import (
     MAX_RESIDUE_TYPE,
     AMINO_ACID_s,
     PROLINE_INDEX,
@@ -22,8 +30,8 @@ from residue_constants import (
     BOND_ANGLE0,
 )
 
-from libcg import get_residue_center_of_mass
-from torch_basics import (
+from cg2all.lib.libcg import get_residue_center_of_mass
+from cg2all.lib.torch_basics import (
     v_size,
     v_norm,
     v_norm_safe,
@@ -50,9 +58,9 @@ def loss_f(
     if use_alt:
         # at this point, it is used ONLY for FAPE_all/mse_R
         # because the others do NOT depend on symmetric sidechain coordinates
-        batch.ndata["output_xyz_ref"] = get_output_xyz_ref(batch, R)
+        batch.node["output_xyz_ref"] = get_output_xyz_ref(batch, R)
     else:
-        batch.ndata["output_xyz_ref"] = batch.ndata["output_xyz"]
+        batch.node["output_xyz_ref"] = batch.node["output_xyz"]
     #
     loss = {}
     if loss_weight.get("rigid_body", 0.0) > 0.0:
@@ -119,39 +127,39 @@ def loss_f(
     return loss
 
 
-def get_output_xyz_ref(batch: dgl.DGLGraph, R: torch.Tensor) -> torch.Tensor:
-    mask = batch.ndata["heavy_atom_mask"]
-    d = torch.sum(torch.pow(R - batch.ndata["output_xyz"], 2).sum(dim=-1) * mask, dim=-1)
-    d_alt = torch.sum(torch.pow(R - batch.ndata["output_xyz_alt"], 2).sum(dim=-1) * mask, dim=-1)
+def get_output_xyz_ref(batch: Graph, R: torch.Tensor) -> torch.Tensor:
+    mask = batch.node["heavy_atom_mask"]
+    d = torch.sum(torch.pow(R - batch.node["output_xyz"], 2).sum(dim=-1) * mask, dim=-1)
+    d_alt = torch.sum(torch.pow(R - batch.node["output_xyz_alt"], 2).sum(dim=-1) * mask, dim=-1)
     #
     xyz = torch.where(
         (d <= d_alt)[:, None, None],
-        batch.ndata["output_xyz"],
-        batch.ndata["output_xyz_alt"],
+        batch.node["output_xyz"],
+        batch.node["output_xyz_alt"],
     ).detach()
     return xyz
 
 
 # MSE loss for comparing coordinates
-def loss_f_mse_R(batch: dgl.DGLGraph, R: torch.Tensor, use_alt=True):
-    mask = batch.ndata["heavy_atom_mask"][..., None]
-    d = torch.sum(torch.pow((R - batch.ndata["output_xyz_ref"]) * mask, 2))
+def loss_f_mse_R(batch: Graph, R: torch.Tensor, use_alt=True):
+    mask = batch.node["heavy_atom_mask"][..., None]
+    d = torch.sum(torch.pow((R - batch.node["output_xyz_ref"]) * mask, 2))
     return d / mask.sum()
 
 
-def loss_f_v_cntr(batch: dgl.DGLGraph, R: torch.Tensor):
-    r_cntr = get_residue_center_of_mass(R, batch.ndata["atomic_mass"])
+def loss_f_v_cntr(batch: Graph, R: torch.Tensor):
+    r_cntr = get_residue_center_of_mass(R, batch.node["atomic_mass"])
     v_cntr = r_cntr - R[:, ATOM_INDEX_CA]
     loss_angle = torch.mean(
-        torch.abs(1.0 - inner_product(v_norm_safe(v_cntr), v_norm(batch.ndata["v_cntr"])))
+        torch.abs(1.0 - inner_product(v_norm_safe(v_cntr), v_norm(batch.node["v_cntr"])))
     )
     #
-    loss_distance = torch.mean(torch.abs(v_size(v_cntr) - v_size(batch.ndata["v_cntr"])))
+    loss_distance = torch.mean(torch.abs(v_size(v_cntr) - v_size(batch.node["v_cntr"])))
     return loss_angle + loss_distance * 10.0
 
 
-def loss_f_rigid_body(batch: dgl.DGLGraph, R: torch.Tensor) -> torch.Tensor:
-    R_ref = batch.ndata["output_xyz"]
+def loss_f_rigid_body(batch: Graph, R: torch.Tensor) -> torch.Tensor:
+    R_ref = batch.node["output_xyz"]
     #
     # deviation of the backbone rigids, N, CA, C
     loss_translation = torch.mean(torch.abs(R[:, :3, :] - R_ref[:, :3, :]))
@@ -167,9 +175,9 @@ def loss_f_rigid_body(batch: dgl.DGLGraph, R: torch.Tensor) -> torch.Tensor:
 
 
 def loss_f_rotation_matrix(
-    batch: dgl.DGLGraph, bb: torch.Tensor, bb0: torch.Tensor, norm_weight: float = 0.01
+    batch: Graph, bb: torch.Tensor, bb0: torch.Tensor, norm_weight: float = 0.01
 ) -> torch.Tensor:
-    loss_bb = torch.mean(torch.abs(bb[:, :2] - batch.ndata["correct_bb"][:, :2]))
+    loss_bb = torch.mean(torch.abs(bb[:, :2] - batch.node["correct_bb"][:, :2]))
     #
     if bb0 is not None and norm_weight > 0.0:
         loss_bb_norm_1 = torch.mean(torch.abs(v_size(bb0[:, 0]) - 1.0))
@@ -180,7 +188,7 @@ def loss_f_rotation_matrix(
 
 
 def loss_f_FAPE_CA(
-    batch: dgl.DGLGraph, R: torch.Tensor, bb: torch.Tensor, d_clamp: float = 1.0
+    batch: Graph, R: torch.Tensor, bb: torch.Tensor, d_clamp: float = 1.0
 ) -> torch.Tensor:
     # time: ~30% vs. loss_f_FAPE_CA_old
     # memory: O(N^2) vs. O(N) for loss_f_FAPE_CA_old
@@ -188,14 +196,14 @@ def loss_f_FAPE_CA(
     #
     first = 0
     loss = 0.0
-    for batch_index, data in enumerate(dgl.unbatch(batch)):
-        n_residue = data.num_nodes()
+    for batch_index, data in enumerate(_unbatch_graphs(batch)):
+        n_residue = data.num_nodes
         last = first + n_residue
         #
         _R = R[first:last, ATOM_INDEX_CA]
         _bb = bb[first:last][:, None]
-        R_ref = data.ndata["output_xyz"][:, ATOM_INDEX_CA]
-        bb_ref = data.ndata["correct_bb"][:, None]
+        R_ref = data.node["output_xyz"][:, ATOM_INDEX_CA]
+        bb_ref = data.node["correct_bb"][:, None]
         #
         r = rotate_vector_inv(_bb[:, :, :3], _R[None, :] - _bb[:, :, 3])
         r_ref = rotate_vector_inv(bb_ref[:, :, :3], R_ref[None, :] - bb_ref[:, :, 3])
@@ -205,11 +213,11 @@ def loss_f_FAPE_CA(
         #
         first = last
 
-    return loss / batch.batch_size
+    return loss / _batch_size(batch)
 
 
 def loss_f_FAPE_all(
-    batch: dgl.DGLGraph, R: torch.Tensor, bb: torch.Tensor, d_clamp: float = 1.0
+    batch: Graph, R: torch.Tensor, bb: torch.Tensor, d_clamp: float = 1.0
 ) -> torch.Tensor:
     # time: ~30% vs. loss_f_FAPE_all_old
     # memory: O(N^2) vs. O(N) for loss_f_FAPE_all_old
@@ -217,15 +225,15 @@ def loss_f_FAPE_all(
     #
     first = 0
     loss = 0.0
-    for batch_index, data in enumerate(dgl.unbatch(batch)):
-        n_residue = data.num_nodes()
+    for batch_index, data in enumerate(_unbatch_graphs(batch)):
+        n_residue = data.num_nodes
         last = first + n_residue
         #
-        mask = data.ndata["heavy_atom_mask"] > 0.0
+        mask = data.node["heavy_atom_mask"] > 0.0
         _R = R[first:last]
         _bb = bb[first:last][:, None]  # shape=(N, 1, 4, 3)
-        bb_ref = data.ndata["correct_bb"][:, None]
-        R_ref = data.ndata["output_xyz_ref"]  # use symmetry-corrected reference structure
+        bb_ref = data.node["correct_bb"][:, None]
+        R_ref = data.node["output_xyz_ref"]  # use symmetry-corrected reference structure
         #
         r = rotate_vector_inv(_bb[:, :, None, :3], _R[None, :] - _bb[..., 3, :][:, None])
         r_ref = rotate_vector_inv(
@@ -237,16 +245,16 @@ def loss_f_FAPE_all(
         #
         first = last
         #
-    return loss / batch.batch_size
+    return loss / _batch_size(batch)
 
 
 # Bonded energy penalties
-def loss_f_bonded_energy(batch: dgl.DGLGraph, R: torch.Tensor, weight_s=(1.0, 0.5)):
+def loss_f_bonded_energy(batch: Graph, R: torch.Tensor, weight_s=(1.0, 0.5)):
     if weight_s[0] == 0.0:
         return 0.0
 
-    R_ref = batch.ndata["output_xyz"]
-    bonded = batch.ndata["continuous"][1:]
+    R_ref = batch.node["output_xyz"]
+    bonded = batch.node["continuous"][1:]
     n_bonded = torch.sum(bonded)
 
     # vector: -C -> N
@@ -293,9 +301,9 @@ def loss_f_bonded_energy(batch: dgl.DGLGraph, R: torch.Tensor, weight_s=(1.0, 0.
     return bond_energy * weight_s[0] + angle_energy * weight_s[1]
 
 
-def loss_f_bonded_energy_aux(batch: dgl.DGLGraph, R: torch.Tensor):
+def loss_f_bonded_energy_aux(batch: Graph, R: torch.Tensor):
     # proline ring closure
-    proline = batch.ndata["residue_type"] == PROLINE_INDEX
+    proline = batch.node["residue_type"] == PROLINE_INDEX
     if torch.any(proline):
         R_pro_N = R[proline, ATOM_INDEX_N]
         R_pro_CD = R[proline, ATOM_INDEX_PRO_CD]
@@ -306,15 +314,15 @@ def loss_f_bonded_energy_aux(batch: dgl.DGLGraph, R: torch.Tensor):
 
     # disulfide bond
     bond_energy_ssbond = torch.zeros(1, dtype=DTYPE, device=R.device)
-    for batch_index in range(batch.batch_size):
-        data = dgl.slice_batch(batch, batch_index, store_ids=True)
-        if not torch.any(data.ndata["ssbond_index"] >= 0):
+    for batch_index in range(_batch_size(batch)):
+        data = _slice_batch(batch, batch_index, store_ids=True)
+        if not torch.any(data.node["ssbond_index"] >= 0):
             continue
         #
-        _R = R[data.ndata["_ID"]]
-        cys_1_index = data.ndata["ssbond_index"]
+        _R = R[data.node["_ID"]]
+        cys_1_index = data.node["ssbond_index"]
         disu = cys_1_index >= 0
-        cys_0_index = data.nodes()[disu]
+        cys_0_index = torch.arange(data.num_nodes, device=data.pos.device)[disu]
         cys_1_index = cys_1_index[disu]
         R_cys_0 = _R[cys_0_index, ATOM_INDEX_CYS_SG]
         R_cys_1 = _R[cys_1_index, ATOM_INDEX_CYS_SG]
@@ -326,8 +334,8 @@ def loss_f_bonded_energy_aux(batch: dgl.DGLGraph, R: torch.Tensor):
     return bond_energy_pro.sum() + bond_energy_ssbond.sum()
 
 
-def loss_f_backbone_torsion(batch: dgl.DGLGraph, R: torch.Tensor):
-    bonded = batch.ndata["continuous"][1:] > 0.0
+def loss_f_backbone_torsion(batch: Graph, R: torch.Tensor):
+    bonded = batch.node["continuous"][1:] > 0.0
     #
     r_N = R[:, (ATOM_INDEX_N,), :]
     r_CA = R[:, (ATOM_INDEX_CA,), :]
@@ -342,7 +350,7 @@ def loss_f_backbone_torsion(batch: dgl.DGLGraph, R: torch.Tensor):
     )[bonded]
     angle = torsion_angle(r)
     #
-    R_ref = batch.ndata["output_xyz"]
+    R_ref = batch.node["output_xyz"]
     r_N_ref = R_ref[:, (ATOM_INDEX_N,), :]
     r_CA_ref = R_ref[:, (ATOM_INDEX_CA,), :]
     r_C_ref = R_ref[:, (ATOM_INDEX_C,), :]
@@ -364,13 +372,13 @@ def loss_f_backbone_torsion(batch: dgl.DGLGraph, R: torch.Tensor):
 
 
 def loss_f_torsion_angle(
-    batch: dgl.DGLGraph,
+    batch: Graph,
     sc: torch.Tensor,
     sc0: Optional[torch.Tensor] = None,
     norm_weight: Optional[float] = 0.01,
 ):
-    sc_ref = batch.ndata["correct_torsion"]  # shape=(N, MAX_TORSION, MAX_PERIODIC)
-    mask = batch.ndata["torsion_mask"]  # shape=(N, MAX_TORSION)
+    sc_ref = batch.node["correct_torsion"]  # shape=(N, MAX_TORSION, MAX_PERIODIC)
+    mask = batch.node["torsion_mask"]  # shape=(N, MAX_TORSION)
     #
     sc_cos = torch.cos(sc_ref)
     sc_sin = torch.sin(sc_ref)
@@ -386,7 +394,7 @@ def loss_f_torsion_angle(
 
 
 def loss_f_atomic_clash(
-    batch: dgl.DGLGraph,
+    batch: Graph,
     R: torch.Tensor,
     RIGID_OPs,
     vdw_scale=1.0,
@@ -403,14 +411,14 @@ def loss_f_atomic_clash(
 
     #
     def get_pairs(data, R, g_radius):
-        g = dgl.radius_graph(R, g_radius, self_loop=False)
+        g = _radius_graph(R, g_radius, self_loop=False)
         #
-        edges = g.edges()
+        edges = (g[0], g[1])
         ssbond = torch.zeros_like(edges[0], dtype=bool)
         #
-        cys_i = torch.nonzero(data.ndata["ssbond_index"] >= 0)[:, 0]
+        cys_i = torch.nonzero(data.node["ssbond_index"] >= 0)[:, 0]
         if cys_i.size(0) > 0:
-            cys_j = data.ndata["ssbond_index"][cys_i]
+            cys_j = data.node["ssbond_index"][cys_i]
             try:
                 eids = g.edge_ids(cys_i, cys_j)
                 ssbond[eids] = True
@@ -425,19 +433,19 @@ def loss_f_atomic_clash(
 
     #
     energy = 0.0
-    for batch_index in range(batch.batch_size):
-        data = dgl.slice_batch(batch, batch_index, store_ids=True)
-        _R = R[data.ndata["_ID"]]
+    for batch_index in range(_batch_size(batch)):
+        data = _slice_batch(batch, batch_index, store_ids=True)
+        _R = R[data.node["_ID"]]
         (i, j), ssbond = get_pairs(data, _R[:, ATOM_INDEX_CA], g_radius=g_radius)
         #
-        mask_i = data.ndata["output_atom_mask"][i] > 0.0
-        mask_j = data.ndata["output_atom_mask"][j] > 0.0
+        mask_i = data.node["output_atom_mask"][i] > 0.0
+        mask_j = data.node["output_atom_mask"][j] > 0.0
         mask = mask_j[:, :, None] & mask_i[:, None, :]
         #
         # find consecutive residue pairs (i == j + 1)
         y = i == j + 1
-        curr_residue_type = data.ndata["residue_type"][i[y]]
-        prev_residue_type = data.ndata["residue_type"][j[y]]
+        curr_residue_type = data.node["residue_type"][i[y]]
+        prev_residue_type = data.node["residue_type"][j[y]]
         curr_bb = _RIGID_GROUPS_DEP[curr_residue_type] < 3
         curr_bb[curr_residue_type == PROLINE_INDEX, :7] = True
         prev_bb = _RIGID_GROUPS_DEP[prev_residue_type] < 3
@@ -451,12 +459,12 @@ def loss_f_atomic_clash(
         dr = _R[j][:, :, None] - _R[i][:, None, :]
         dist = v_size(dr)
         #
-        epsilon_i = data.ndata["atomic_radius"][i, :, 0, 0]
-        epsilon_j = data.ndata["atomic_radius"][j, :, 0, 0]
+        epsilon_i = data.node["atomic_radius"][i, :, 0, 0]
+        epsilon_j = data.node["atomic_radius"][j, :, 0, 0]
         epsilon = torch.sqrt(epsilon_j[:, :, None] * epsilon_i[:, None, :]) * mask
         #
-        radius_i = data.ndata["atomic_radius"][i, :, 0, 1]
-        radius_j = data.ndata["atomic_radius"][j, :, 0, 1]
+        radius_i = data.node["atomic_radius"][i, :, 0, 1]
+        radius_j = data.node["atomic_radius"][j, :, 0, 1]
         radius_sum = radius_j[:, :, None] + radius_i[:, None, :]
         radius_sum = radius_sum * vdw_scale
         #
@@ -471,13 +479,13 @@ def loss_f_atomic_clash(
 
 
 def loss_f_torsion_energy(
-    batch: dgl.DGLGraph,
+    batch: Graph,
     R: torch.Tensor,
     ss: torch.Tensor,
     TORSION_PARs,
     energy_clamp=0.0,
 ):
-    residue_type = batch.ndata["residue_type"]
+    residue_type = batch.node["residue_type"]
     n_residue = residue_type.size(0)
     par = TORSION_PARs[0][ss, residue_type]
     atom_index = TORSION_PARs[1][residue_type]
@@ -491,13 +499,13 @@ def loss_f_torsion_energy(
     return torch.sum(energy) / n_residue
 
 
-def loss_f_ss(batch: dgl.DGLGraph, ss0: torch.Tensor):
-    loss = torch.nn.functional.cross_entropy(ss0, batch.ndata["ss"], reduction="mean")
+def loss_f_ss(batch: Graph, ss0: torch.Tensor):
+    loss = torch.nn.functional.cross_entropy(ss0, batch.node["ss"], reduction="mean")
     return loss
 
 
 def find_atomic_clash(
-    batch: dgl.DGLGraph, R: torch.Tensor, RIGID_OPs, vdw_scale=1.0, energy_clamp=0.0
+    batch: Graph, R: torch.Tensor, RIGID_OPs, vdw_scale=1.0, energy_clamp=0.0
 ):
     # CAUTION: this function finds atomic clashes for EDGES
     # it evaluates ONLY for edges, so it CANNOT detect clashes between nodes if they are not connected
@@ -505,18 +513,18 @@ def find_atomic_clash(
     _RIGID_GROUPS_DEP = RIGID_OPs[1][1]
 
     feat = []
-    for batch_index in range(batch.batch_size):
-        data = dgl.slice_batch(batch, batch_index, store_ids=True)
-        _R = R[data.ndata["_ID"]]
-        i, j = data.edges()
+    for batch_index in range(_batch_size(batch)):
+        data = _slice_batch(batch, batch_index, store_ids=True)
+        _R = R[data.node["_ID"]]
+        i, j = (data.edge_index[0], data.edge_index[1])
         #
-        mask_i = data.ndata["output_atom_mask"][i] > 0.0
-        mask_j = data.ndata["output_atom_mask"][j] > 0.0
+        mask_i = data.node["output_atom_mask"][i] > 0.0
+        mask_j = data.node["output_atom_mask"][j] > 0.0
         mask = mask_j[:, :, None] & mask_i[:, None, :]
         #
         x = i == j + 1
-        curr_residue_type = data.ndata["residue_type"][i[x]]
-        prev_residue_type = data.ndata["residue_type"][j[x]]
+        curr_residue_type = data.node["residue_type"][i[x]]
+        prev_residue_type = data.node["residue_type"][j[x]]
         curr_bb = _RIGID_GROUPS_DEP[curr_residue_type] < 3
         curr_bb[curr_residue_type == PROLINE_INDEX, :7] = True
         prev_bb = _RIGID_GROUPS_DEP[prev_residue_type] < 3
@@ -524,15 +532,15 @@ def find_atomic_clash(
         mask[x] = mask[x] & (~bb_pair)
         #
         x = i + 1 == j
-        curr_residue_type = data.ndata["residue_type"][i[x]]
-        next_residue_type = data.ndata["residue_type"][j[x]]
+        curr_residue_type = data.node["residue_type"][i[x]]
+        next_residue_type = data.node["residue_type"][j[x]]
         curr_bb = _RIGID_GROUPS_DEP[curr_residue_type] < 3
         next_bb = _RIGID_GROUPS_DEP[next_residue_type] < 3
         next_bb[next_residue_type == PROLINE_INDEX, :7] = True
         bb_pair = next_bb[:, :, None] & curr_bb[:, None, :]
         mask[x] = mask[x] & (~bb_pair)
         #
-        ssbond = data.edata["edge_feat_0"][:, 1, 0] == 1.0
+        ssbond = data.edge["edge_feat_0"][:, 1, 0] == 1.0
         mask[ssbond, ATOM_INDEX_CYS_CB:, ATOM_INDEX_CYS_CB:] = False
         mask[ssbond, ATOM_INDEX_CYS_SG, ATOM_INDEX_CA] = False
         mask[ssbond, ATOM_INDEX_CA, ATOM_INDEX_CYS_SG] = False
@@ -541,12 +549,12 @@ def find_atomic_clash(
         dr = _R[j][:, :, None] - _R[i][:, None, :]
         dist = v_size(dr)
         #
-        epsilon_i = data.ndata["atomic_radius"][i, :, 0, 0]
-        epsilon_j = data.ndata["atomic_radius"][j, :, 0, 0]
+        epsilon_i = data.node["atomic_radius"][i, :, 0, 0]
+        epsilon_j = data.node["atomic_radius"][j, :, 0, 0]
         epsilon = torch.sqrt(epsilon_j[:, :, None] * epsilon_i[:, None, :]) * mask
         #
-        radius_i = data.ndata["atomic_radius"][i, :, 0, 1]
-        radius_j = data.ndata["atomic_radius"][j, :, 0, 1]
+        radius_i = data.node["atomic_radius"][i, :, 0, 1]
+        radius_j = data.node["atomic_radius"][j, :, 0, 1]
         radius_sum = radius_j[:, :, None] + radius_i[:, None, :]
         radius_sum = radius_sum * vdw_scale
         #
@@ -656,10 +664,10 @@ class CoarseGrainedGeometryEnergy(object):
             return self.eval_bonded_bound(batch, weight=weight)
 
     def eval_bonded_bound(self, batch, weight=[1.0, 1.0]):
-        r_cg = batch.ndata["pos"]
-        residue_type = batch.ndata["residue_type"]
+        r_cg = batch.node["pos"]
+        residue_type = batch.node["residue_type"]
         #
-        bonded = batch.ndata["continuous"][1:]
+        bonded = batch.node["continuous"][1:]
         n_bonded = torch.sum(bonded)
         b_len0 = self.b_len0[residue_type[1:], residue_type[:-1]]
         v1 = r_cg[1:] - r_cg[:-1]
@@ -682,10 +690,10 @@ class CoarseGrainedGeometryEnergy(object):
         return bond_energy * weight[0] + angle_energy * weight[1]
 
     def eval_bonded_harmonic(self, batch, weight=[1.0, 1.0]):
-        r_cg = batch.ndata["pos"]
-        residue_type = batch.ndata["residue_type"]
+        r_cg = batch.node["pos"]
+        residue_type = batch.node["residue_type"]
         #
-        bonded = batch.ndata["continuous"][1:]
+        bonded = batch.node["continuous"][1:]
         n_bonded = torch.sum(bonded)
         b_len0 = self.b_len0[residue_type[1:], residue_type[:-1]]
         v1 = r_cg[1:] - r_cg[:-1]
@@ -707,17 +715,17 @@ class CoarseGrainedGeometryEnergy(object):
         return bond_energy * weight[0] + angle_energy * weight[1]
 
     def eval_vdw(self, batch):
-        r_cg = batch.ndata["pos"]
+        r_cg = batch.node["pos"]
         #
-        g = dgl.radius_graph(r_cg, 0.5, self_loop=False)
-        edges = g.edges()
+        g = _radius_graph(r_cg, 0.5, self_loop=False)
+        edges = (g[0], g[1])
         sequence_separation = edges[1] - edges[0]
         valid = sequence_separation > 2
         edges = (edges[0][valid], edges[1][valid])
         #
         dij = v_size(r_cg[edges[0]] - r_cg[edges[1]])
         #
-        index = batch.ndata["residue_type"]
+        index = batch.node["residue_type"]
         i = index[edges[0]]
         j = index[edges[1]]
         vdw_sum = self.vdw[i, j]
@@ -729,10 +737,10 @@ class CoarseGrainedGeometryEnergy(object):
 
 def test():
     import time
-    from libconfig import BASE
+    from cg2all.lib.libconfig import BASE
     import libcg
     import functools
-    from libdata import PDBset, create_trajectory_from_batch
+    from cg2all.lib.libdata import PDBset, create_trajectory_from_batch
 
     base_dir = BASE / "pdb.processed"
     pdblist = base_dir / "loss_test"
@@ -744,7 +752,7 @@ def test():
         cg_model,
         radius=0.8,
     )
-    train_loader = dgl.dataloading.GraphDataLoader(
+    train_loader = __import__("torch.utils.data", fromlist=["DataLoader"]).DataLoader(
         train_set, batch_size=2, shuffle=False, num_workers=1
     )
     cuda = torch.cuda.device_count() > 0
@@ -755,15 +763,15 @@ def test():
     else:
         device = torch.device("cpu")
     #
-    native = dgl.slice_batch(batch, 0)
-    model = dgl.slice_batch(batch, 1)
+    native = _slice_batch(batch, 0)
+    model = _slice_batch(batch, 1)
     #
-    R_ref = native.ndata["output_xyz"].clone()
-    bb_ref = native.ndata["correct_bb"].clone()
-    R_model = model.ndata["output_xyz"].clone()
-    bb_model = model.ndata["correct_bb"].clone()
+    R_ref = native.node["output_xyz"].clone()
+    bb_ref = native.node["correct_bb"].clone()
+    R_model = model.node["output_xyz"].clone()
+    bb_model = model.node["correct_bb"].clone()
 
-    from residue_constants import (
+    from cg2all.lib.residue_constants import (
         RIGID_TRANSFORMS_TENSOR,
         RIGID_TRANSFORMS_DEP,
         RIGID_GROUPS_TENSOR,

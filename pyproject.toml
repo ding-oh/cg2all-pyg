@@ -1,14 +1,15 @@
 [tool.poetry]
-name = "cg2all"
-version = "1.2.0"
-description = "Convert coarse-grained protein structure to all-atom structure"
+name = "cg2all-pyg"
+version = "2.0.0-dev"
+description = "Convert coarse-grained protein structure to all-atom structure (DGL-free PyG-based fork of huhlim/cg2all)."
 authors = [
     "Lim Heo <huhlim@gmail.com>",
     "Michael Feig <feiglab@gmail.com>",
 ]
 license = "Apache-2.0"
 readme = "README.md"
-repository = "https://github.com/huhlim/cg2all"
+repository = "https://github.com/ding-oh/cg2all-pyg"
+packages = [{ include = "cg2all" }]
 exclude = ["cg2all/set*"]
 
 [tool.poetry.scripts]
@@ -17,18 +18,21 @@ convert_cg2all = "cg2all.script.convert_cg2all:main"
 cryo_em_minimizer = "cg2all.script.cryo_em_minimizer:main"
 
 [tool.poetry.dependencies]
-python = "^3.8"
-torch = "^1.11"
-dgl = ">=0.9"
-e3nn = "^0.5"
-ml-collections = "^0.1.1"
-numpy = "^1.21"
+python = ">=3.10,<3.13"
+torch = ">=2.2,<3"
+torch_geometric = ">=2.5,<3"
+torch_cluster = ">=1.6"
+e3nn = ">=0.5,<1"
+ml-collections = ">=0.1.1"
+numpy = ">=1.23,<3"
 mdtraj = {git = "https://github.com/huhlim/mdtraj.git"}
-se3_transformer = {git = "https://github.com/huhlim/SE3Transformer.git"}
+gdown = ">=5"
+mrcfile = ">=1.5"
+tqdm = ">=4.64"
 
 [tool.poetry.group.dev.dependencies]
-tqdm = "^4.64.1"
-pytorch-lightning = "^1.7.3"
+pytest = ">=8"
+lightning = ">=2.2"
 
 [build-system]
 requires = ["poetry-core"]
@@ -37,3 +41,16 @@ build-backend = "poetry.core.masonry.api"
 [tool.black]
 line-length = 100
 include = '\.pyi?$'
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# NOTES on deps
+# - dgl and se3_transformer (the huhlim/SE3Transformer fork) are removed; the SE(3)-Transformer
+#   has been ported in-tree to cg2all/lib/se3/ (state_dict compatible with the legacy
+#   checkpoints on Zenodo 8393343).
+# - torch_cluster provides radius_graph; its pre-built wheels are hosted per-torch/cuda version
+#   at https://data.pyg.org/whl/. For torch 2.5 + CUDA 12.4 install with
+#       pip install torch_cluster -f https://data.pyg.org/whl/torch-2.5.0+cu124.html
+# - torch_scatter is intentionally not required: cg2all.lib.graph uses torch 2.x native
+#   scatter_add_/scatter_reduce instead.

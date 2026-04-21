@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 
 import numpy as np
-from numpy_basics import *
-from residue_constants import *
+from cg2all.lib.numpy_basics import *
+from cg2all.lib.residue_constants import *
 from collections import namedtuple
 import itertools
 
-from libconfig import DATA_HOME
+from cg2all.lib.libconfig import DATA_HOME
 
 
 def combine_opr_s(opr_s):

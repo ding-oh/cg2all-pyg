@@ -5,8 +5,8 @@ import numpy as np
 import torch
 from collections import namedtuple
 
-from libconfig import DATA_HOME
-from residue_constants_base import *
+from cg2all.lib.libconfig import DATA_HOME
+from cg2all.lib.residue_constants_base import *
 
 
 def get_rigid_group_by_torsion(ss, residue_name, tor_name, index=-1, sub_index=-1):

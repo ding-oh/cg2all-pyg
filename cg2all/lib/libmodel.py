@@ -11,12 +11,11 @@ import torch
 import torch.nn as nn
 from ml_collections import ConfigDict
 
-import dgl
+from cg2all.lib.graph import Graph
+from cg2all.lib.se3 import Fiber, SE3Transformer
+from cg2all.lib.se3.layers import LinearSE3, NormSE3
 
-from se3_transformer import Fiber, SE3Transformer
-from se3_transformer.layers import LinearSE3, NormSE3
-
-from residue_constants import (
+from cg2all.lib.residue_constants import (
     MAX_SS,
     MAX_RESIDUE_TYPE,
     MAX_ATOM,
@@ -33,17 +32,17 @@ from residue_constants import (
     TORSION_ENERGY_TENSOR,
     TORSION_ENERGY_DEP,
 )
-from libloss import loss_f, find_atomic_clash
-from torch_basics import (
+from cg2all.lib.libloss import loss_f, find_atomic_clash
+from cg2all.lib.torch_basics import (
     v_size,
     v_norm_safe,
     inner_product,
     rotate_matrix,
     rotate_vector,
 )
-from libmetric import rmsd_CA, rmsd_rigid, rmsd_all, rmse_bonded
-from libcg import get_residue_center_of_mass, get_backbone_angles
-from libconfig import DTYPE
+from cg2all.lib.libmetric import rmsd_CA, rmsd_rigid, rmsd_all, rmse_bonded
+from cg2all.lib.libcg import get_residue_center_of_mass, get_backbone_angles
+from cg2all.lib.libconfig import DTYPE
 
 
 CONFIG = ConfigDict()
@@ -220,11 +219,11 @@ class EmbeddingModule(nn.Module):
             self.use_embedding = False
             self.register_buffer("one_hot_encoding", torch.eye(config.num_embeddings))
 
-    def forward(self, batch: dgl.DGLGraph):
+    def forward(self, batch: Graph):
         if self.use_embedding:
-            return self.layer(batch.ndata["residue_type"])
+            return self.layer(batch.node["residue_type"])
         else:
-            return self.one_hot_encoding[batch.ndata["residue_type"]]
+            return self.one_hot_encoding[batch.node["residue_type"]]
 
 
 class InitializationModule(nn.Module):
@@ -305,7 +304,7 @@ class InteractionModule(nn.Module):
             low_memory=config.low_memory,
         )
 
-    def forward(self, batch: dgl.DGLGraph, node_feats, edge_feats):
+    def forward(self, batch: Graph, node_feats, edge_feats):
         out = self.graph_module(batch, node_feats=node_feats, edge_feats=edge_feats)
         return out
 
@@ -460,17 +459,17 @@ class Model(nn.Module):
         #
         self.TORSION_PARs = (_TORSION_ENERGY_TENSOR, _TORSION_ENERGY_DEP)
 
-    def forward(self, batch: dgl.DGLGraph):
+    def forward(self, batch: Graph):
         loss = {}
         ret = {}
         #
         # residue_type --> embedding
         embedding = self.embedding_module(batch)
         #
-        edge_feats = {"0": batch.edata["edge_feat_0"]}
+        edge_feats = {"0": batch.edge["edge_feat_0"]}
         node_feats = {
-            "0": torch.cat([batch.ndata["node_feat_0"], embedding[..., None]], dim=1),
-            "1": batch.ndata["node_feat_1"],
+            "0": torch.cat([batch.node["node_feat_0"], embedding[..., None]], dim=1),
+            "1": batch.node["node_feat_1"],
         }
         #
         out0 = self.initialization_module(node_feats)
@@ -487,7 +486,7 @@ class Model(nn.Module):
         if self.structure_module.fix_atom[0]:
             bb[:, 3] = bb[:, 3] * 0.0
         if self.structure_module.fix_atom[1]:
-            bb[:, :3] = batch.ndata["correct_bb"][:, :3]
+            bb[:, :3] = batch.node["correct_bb"][:, :3]
         ret["bb"] = bb
         ret["sc"] = sc
         ret["bb0"] = bb0
@@ -499,11 +498,11 @@ class Model(nn.Module):
         #
         ret["R"], ret["opr_bb"] = build_structure(self.RIGID_OPs, batch, ss, bb, sc=sc)
         if self.structure_module.fix_atom[1]:
-            ret["R"][:, ATOM_INDEX_N] = batch.ndata["output_xyz"][:, ATOM_INDEX_N]
-            ret["R"][:, ATOM_INDEX_C] = batch.ndata["output_xyz"][:, ATOM_INDEX_C]
+            ret["R"][:, ATOM_INDEX_N] = batch.node["output_xyz"][:, ATOM_INDEX_N]
+            ret["R"][:, ATOM_INDEX_C] = batch.node["output_xyz"][:, ATOM_INDEX_C]
         if self.structure_module.fix_atom[2]:
-            mask = batch.ndata["pdb_atom_mask"][:, ATOM_INDEX_O] > 0.0
-            ret["R"][mask, ATOM_INDEX_O] = batch.ndata["output_xyz"][mask, ATOM_INDEX_O]
+            mask = batch.node["pdb_atom_mask"][:, ATOM_INDEX_O] > 0.0
+            ret["R"][mask, ATOM_INDEX_O] = batch.node["output_xyz"][mask, ATOM_INDEX_O]
         #
         if self.compute_loss or self.training:
             loss["final"] = loss_f(
@@ -521,16 +520,16 @@ class Model(nn.Module):
 
     def calc_metrics(self, batch, ret):
         R = ret["R"]
-        R_ref = batch.ndata["output_xyz"]
+        R_ref = batch.node["output_xyz"]
         #
         metric_s = {}
         metric_s["clash"] = find_atomic_clash(batch, R, self.RIGID_OPs).mean()
         #
         metric_s["rmsd_CA"] = rmsd_CA(R, R_ref)
         metric_s["rmsd_rigid"] = rmsd_rigid(R, R_ref)
-        metric_s["rmsd_all"] = rmsd_all(R, R_ref, batch.ndata["heavy_atom_mask"])
+        metric_s["rmsd_all"] = rmsd_all(R, R_ref, batch.node["heavy_atom_mask"])
         #
-        bonded = rmse_bonded(R, batch.ndata["continuous"])
+        bonded = rmse_bonded(R, batch.node["continuous"])
         metric_s["bond_length"] = bonded[0]
         metric_s["bond_angle"] = bonded[1]
         metric_s["omega_angle"] = bonded[2]
@@ -547,14 +546,14 @@ def combine_operations(X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
 
 def build_structure(
     RIGID_OPs,
-    batch: dgl.DGLGraph,
+    batch: Graph,
     ss: torch.Tensor,
     bb: torch.Tensor,
     sc: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     dtype = bb.dtype
     device = bb.device
-    residue_type = batch.ndata["residue_type"]
+    residue_type = batch.node["residue_type"]
     #
     transforms = RIGID_OPs[0][0][ss, residue_type]
     rigids = RIGID_OPs[0][1][ss, residue_type]
@@ -565,7 +564,7 @@ def build_structure(
     #
     # backbone operations
     opr[:, 0, :3] = bb[:, :3]
-    opr[:, 0, 3] = bb[:, 3] + batch.ndata["pos"]
+    opr[:, 0, 3] = bb[:, 3] + batch.node["pos"]
 
     # sidechain operations
     if sc is not None:
@@ -630,5 +629,7 @@ def download_ckpt_file(_model_type, ckpt_fn, fix_atom=False):
         url = f"https://zenodo.org/record/8393343/files/{ckpt_fn.name}"
         if not ckpt_fn.parent.exists():
             ckpt_fn.parent.mkdir()
+        resp = requests.get(url)
+        resp.raise_for_status()
         with open(ckpt_fn, "wb") as fout:
-            fout.write(requests.get(url).content)
+            fout.write(resp.content)
