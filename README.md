@@ -234,4 +234,4 @@ BibTeX (published version):
 }
 ```
 
-Upstream project: [huhlim/cg2all](https://github.com/huhlim/cg2all) — [![DOI](https://zenodo.org/badge/585390653.svg)](https://zenodo.org/doi/10.5281/zenodo.10009208)
+Upstream project: [huhlim/cg2all](https://github.com/huhlim/cg2all) — [Zenodo DOI](https://zenodo.org/doi/10.5281/zenodo.10009208)
