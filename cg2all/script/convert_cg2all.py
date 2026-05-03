@@ -35,6 +35,10 @@ import warnings
 warnings.filterwarnings("ignore")
 
 
+def _collate_graphs(xs):
+    return batch_graphs(xs)
+
+
 def main():
     arg = argparse.ArgumentParser(prog="convert_cg2all")
     arg.add_argument("-p", "--pdb", dest="in_pdb_fn", required=True)
@@ -176,15 +180,14 @@ def main():
         unitcell_lengths = input_s.cg.unitcell_lengths
         unitcell_angles = input_s.cg.unitcell_angles
     #
-    collate = lambda xs: batch_graphs(xs)
     if len(input_s) > 1 and (arg.n_proc > 1 or arg.batch_size > 1):
         input_s = DataLoader(
             input_s, batch_size=arg.batch_size, num_workers=arg.n_proc,
-            shuffle=False, collate_fn=collate,
+            shuffle=False, collate_fn=_collate_graphs,
         )
     else:
         input_s = DataLoader(
-            input_s, batch_size=1, num_workers=1, shuffle=False, collate_fn=collate,
+            input_s, batch_size=1, num_workers=1, shuffle=False, collate_fn=_collate_graphs,
         )
     timing["loading_input"] = time.time() - timing["loading_input"]
     #
