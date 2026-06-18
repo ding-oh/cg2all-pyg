@@ -46,6 +46,10 @@ _CG_MODEL_MAP = {
 }
 
 
+def _collate_graphs(xs):
+    return batch_graphs(xs)
+
+
 def convert_cg2all(
     in_pdb_fn,
     out_fn,
@@ -106,7 +110,7 @@ def convert_cg2all(
     if use_loader:
         loader = DataLoader(
             input_s, batch_size=1, num_workers=n_proc,
-            shuffle=False, collate_fn=lambda xs: batch_graphs(xs),
+            shuffle=False, collate_fn=_collate_graphs,
         )
     else:
         loader = None
